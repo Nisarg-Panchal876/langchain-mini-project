@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from app.schemas import GetEmail
 from langchain_core.prompts import PromptTemplate
 from app.llm_model import llm
 from app.spam import generate_spam_reply
+from app.rag_chain import generate_rag_email
+
 app = FastAPI()
 
 @app.post("/analyze")
@@ -65,3 +67,34 @@ Subject: {subject}"""
             spam_reply = generate_spam_reply.invoke({"subject": data.subject, "body": data.body})
         
         return {"category": category, "is_spam": category.lower() in ["irrelevant / casual", "irrelevant/casual"], "spam_reply": spam_reply}
+
+
+@app.post("/company-inquiry")
+def company_inquiry(data: GetEmail):
+    """
+    RAG endpoint — answers company-related customer queries using the
+    internal knowledge base PDF and generates a professional email reply.
+
+    The query is built from the email subject + body for maximum context.
+    """
+    query = f"{data.subject}\n\n{data.body}".strip()
+
+    try:
+        result = generate_rag_email(query)
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Knowledge base index not found. "
+                "Please ensure company_docs.pdf is placed at "
+                "data/company_docs.pdf and the vector store has been built. "
+                f"Details: {str(e)}"
+            ),
+        )
+
+    return {
+        "sender_email": data.sender_email,
+        "subject": data.subject,
+        "reply": result["reply"],
+        "context_used": result["context"],
+    }
