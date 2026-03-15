@@ -2,7 +2,9 @@ from langchain_community.vectorstores import FAISS
 from app.vector_store import get_or_build_vector_store
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-TOP_K = 8  # Increased from 5 — ensures dense table/pricing chunks are included
+TOP_K = 10
+MAX_PAGE_EXPANSION_PER_PAGE = 3
+MAX_TOTAL_CONTEXT_CHUNKS = 16
 
 # ── Retriever singleton ───────────────────────────────────────────────────────
 _vector_store: FAISS = None
@@ -31,10 +33,14 @@ def retrieve_context(query: str, k: int = TOP_K) -> list:
     store = _get_vector_store()
     print(f"[Retriever] Searching for top-{k} chunks for query: {query!r}")
 
-    # similarity_search_with_score returns (doc, score) pairs — lower L2 = better
-    results_with_scores = store.similarity_search_with_score(query, k=k)
+    # Use MMR first for better diversity, then backfill with scored similarity.
+    mmr_docs = store.max_marginal_relevance_search(query, k=k, fetch_k=max(30, k * 3))
+    results_with_scores = store.similarity_search_with_score(query, k=max(k, 6))
+    scored_docs = [doc for doc, score in results_with_scores]
 
-    docs = [doc for doc, score in results_with_scores]
+    docs = _dedupe_docs(mmr_docs + scored_docs)
+    docs = _expand_with_related_page_chunks(store, docs)
+    docs = docs[:MAX_TOTAL_CONTEXT_CHUNKS]
 
     for i, (doc, score) in enumerate(results_with_scores, 1):
         page = doc.metadata.get("page", "?")
@@ -42,6 +48,56 @@ def retrieve_context(query: str, k: int = TOP_K) -> list:
               f"preview={doc.page_content[:80].replace(chr(10), ' ')!r}")
 
     return docs
+
+
+def _dedupe_docs(docs: list) -> list:
+    """Remove duplicate chunks while preserving order."""
+    seen = set()
+    unique = []
+    for doc in docs:
+        key = doc.page_content.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(doc)
+    return unique
+
+
+def _expand_with_related_page_chunks(store: FAISS, docs: list) -> list:
+    """
+    Expand retrieved chunks with a few extra chunks from the same pages.
+
+    This helps when structured lists are split across adjacent chunks and only
+    one item is initially retrieved.
+    """
+    page_hits = {}
+    for doc in docs:
+        page = doc.metadata.get("page")
+        if page is not None:
+            page_hits.setdefault(page, 0)
+
+    # FAISS uses an in-memory docstore when built from documents.
+    all_docs = list(store.docstore._dict.values())
+
+    expanded = list(docs)
+    existing_text = {d.page_content.strip() for d in docs}
+
+    for candidate in all_docs:
+        page = candidate.metadata.get("page")
+        if page not in page_hits:
+            continue
+        if page_hits[page] >= MAX_PAGE_EXPANSION_PER_PAGE:
+            continue
+
+        content_key = candidate.page_content.strip()
+        if content_key in existing_text:
+            continue
+
+        expanded.append(candidate)
+        existing_text.add(content_key)
+        page_hits[page] += 1
+
+    return expanded
 
 
 def format_context(docs: list) -> str:
