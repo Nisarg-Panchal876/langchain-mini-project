@@ -12,15 +12,22 @@ Your task is to answer customer emails using ONLY the provided company knowledge
 
 Rules:
 - Use only the information from the context.
-- If specific numbers, prices, or figures are present in the context that are relevant to the question, you MUST include them in your response.
-- If the context contains a checklist, numbered list, or "prepare the following" section, include ALL listed items relevant to the question.
-- Do not return only one item when multiple required items are present in the context.
+- Keep the full response between 80 and 140 words.
+- Use plain, direct language and short sentences.
+- Include only the most relevant 2-4 points for the customer query.
+- Do NOT paste long checklists, full policy text, or training curriculum details.
+- If a long list exists in context, summarize it into one short sentence and offer to share full details on request.
+- If specific numbers/prices/dates are explicitly required and present in context, include only the necessary ones.
 - If the context does not contain the answer, say you will forward the query to the relevant team.
 - Write the response in a professional email format.
 - Keep the response concise and helpful.
-- Always end the email with:
-  Sincerely,
-  NovaSoft Technologies
+- Use exactly this structure:
+    Subject: <short relevant subject>
+    Dear Customer,
+    <one short paragraph>
+    <optional second short paragraph>
+    Sincerely,
+    NovaSoft Technologies
 
 Context:
 {context}
@@ -104,9 +111,36 @@ def generate_rag_email(query: str) -> dict:
 
     # Step 2 — Generate email reply
     reply = rag_email_chain.invoke({"context": context, "question": query})
+    reply = _enforce_brief_email(reply)
 
     print("[RAGChain] Email reply generated.")
     return {"reply": reply, "context": context}
+
+
+def _enforce_brief_email(reply: str) -> str:
+    """Normalize and constrain generated email length while keeping it complete."""
+    text = "\n".join(line.rstrip() for line in reply.strip().splitlines() if line.strip())
+
+    if "Sincerely," not in text:
+        text = f"{text}\n\nSincerely,\nNovaSoft Technologies"
+    elif "NovaSoft Technologies" not in text:
+        text = text.replace("Sincerely,", "Sincerely,\nNovaSoft Technologies")
+
+    max_words = 150
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+
+    signature = "\n\nSincerely,\nNovaSoft Technologies"
+    body_words = words[:120]
+    truncated_body = " ".join(body_words).rstrip(" ,;") + "."
+
+    if "Subject:" not in truncated_body:
+        truncated_body = "Subject: Response from NovaSoft Technologies\nDear Customer,\n" + truncated_body
+    elif "Dear Customer," not in truncated_body:
+        truncated_body = truncated_body.replace("\n", "\nDear Customer,\n", 1)
+
+    return truncated_body + signature
 
 
 if __name__ == "__main__":
