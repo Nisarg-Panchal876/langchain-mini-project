@@ -1,4 +1,8 @@
+import os
 from langchain_huggingface import HuggingFaceEmbeddings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
@@ -9,6 +13,8 @@ DEVICE = "cpu"
 ENCODE_KWARGS = {"normalize_embeddings": True}  # cosine similarity ready
 
 MODEL_KWARGS = {"device": DEVICE}
+if os.getenv("HF_TOKEN"):
+    MODEL_KWARGS["token"] = os.getenv("HF_TOKEN")
 
 
 def get_embedding_model() -> HuggingFaceEmbeddings:

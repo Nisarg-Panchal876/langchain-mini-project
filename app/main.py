@@ -4,6 +4,7 @@ import os
 import re
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from email.utils import parseaddr
 from typing import Any
 from uuid import uuid4
 import requests
@@ -256,9 +257,14 @@ def has_sales_purchase_signals(subject: str, body: str) -> bool:
 
 def extract_sender_domain(sender_email: str) -> str:
     """Extract and normalize domain from sender email."""
-    if "@" not in sender_email:
+    _, parsed_email = parseaddr(sender_email or "")
+    candidate_email = (parsed_email or sender_email or "").strip()
+
+    if "@" not in candidate_email:
         return ""
-    return sender_email.rsplit("@", 1)[1].strip().lower()
+
+    domain = candidate_email.rsplit("@", 1)[1].strip().lower()
+    return domain.strip("<>\"'()[]{}.,; ")
 
 
 def parse_numeric_value(value: Any) -> float | None:
@@ -445,74 +451,7 @@ def compute_lead_score(
 
 
 def compute_customer_need_score(subject: str, body: str) -> tuple[int, list[str]]:
-    """Use AI to estimate customer demand/order size score between 0 and 10."""
-    prompt = PromptTemplate(
-        template="""
-You are a B2B lead qualification assistant.
-Read the incoming email and estimate customer demand strength on a strict 0-10 scale.
-
-Scoring guidance:
-- 0-2: weak curiosity, no purchase signals
-- 3-4: early exploration, broad questions only
-- 5-6: some buying intent, asks for details/pricing/demo
-- 7-8: strong intent, clear use case, timeline, or expected scale
-- 9-10: very strong intent, explicit large order/budget/urgent procurement
-
-Return JSON only with keys:
-- intent_score: integer between 0 and 10
-- signals: short list of concrete reasons found in the email text
-
-Subject: {subject}
-Body: {body}
-""",
-        input_variables=["subject", "body"],
-        validate_template=True,
-    )
-
-    try:
-        prompt_value = prompt.invoke({"subject": subject, "body": body})
-        llm_result = llm.invoke(prompt_value)
-        text = llm_result.content if isinstance(
-            llm_result.content, str) else ""
-
-        parsed: dict[str, Any] | None = None
-        try:
-            candidate = json.loads(text)
-            if isinstance(candidate, dict):
-                parsed = candidate
-        except Exception:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and start < end:
-                try:
-                    candidate = json.loads(text[start: end + 1])
-                    if isinstance(candidate, dict):
-                        parsed = candidate
-                except Exception:
-                    parsed = None
-
-        if parsed is not None:
-            raw_score = parsed.get("intent_score", 0)
-            try:
-                score = int(raw_score)
-            except Exception:
-                score = 0
-            score = max(0, min(10, score))
-
-            raw_signals = parsed.get("signals", [])
-            if isinstance(raw_signals, list):
-                signals = [str(item)
-                           for item in raw_signals if str(item).strip()]
-            else:
-                signals = []
-
-            if signals:
-                return score, signals[:5]
-            return score, ["AI assessed customer need from email context"]
-    except Exception:
-        pass
-
-    # Deterministic heuristic fallback when AI scoring is unavailable.
+    """Estimate customer demand/order size score between 0 and 10 using heuristics."""
     text = f"{subject} {body}".lower()
     score = 1
     signals: list[str] = []
@@ -550,64 +489,7 @@ Body: {body}
 
 
 def compute_order_size_score(subject: str, body: str) -> tuple[int, str]:
-    """Estimate order size from email and return a score between 1 and 5."""
-    prompt = PromptTemplate(
-        template="""
-You are a B2B sales assistant.
-Read this email and estimate the order size score using only this scale:
-1 = very small
-2 = small
-3 = medium
-4 = large
-5 = very large
-
-Return JSON only with keys:
-- order_size_score: integer from 1 to 5
-- reason: one short reason
-
-Subject: {subject}
-Body: {body}
-""",
-        input_variables=["subject", "body"],
-        validate_template=True,
-    )
-
-    try:
-        prompt_value = prompt.invoke({"subject": subject, "body": body})
-        llm_result = llm.invoke(prompt_value)
-        text = llm_result.content if isinstance(
-            llm_result.content, str) else ""
-
-        parsed: dict[str, Any] | None = None
-        try:
-            candidate = json.loads(text)
-            if isinstance(candidate, dict):
-                parsed = candidate
-        except Exception:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and start < end:
-                try:
-                    candidate = json.loads(text[start: end + 1])
-                    if isinstance(candidate, dict):
-                        parsed = candidate
-                except Exception:
-                    parsed = None
-
-        if parsed is not None:
-            raw_score = parsed.get("order_size_score", 1)
-            try:
-                score = int(raw_score)
-            except Exception:
-                score = 1
-            score = max(1, min(5, score))
-            reason = str(parsed.get(
-                "reason", "AI estimated order size from email content")).strip()
-            return score, reason or "AI estimated order size from email content"
-    except Exception:
-        pass
-
-    # Deterministic fallback when AI scoring is unavailable.
+    """Estimate order size from email and return a score between 1 and 5 using heuristics."""
     text = f"{subject} {body}".lower()
     number_matches = [int(item) for item in re.findall(r"\b\d{2,}\b", text)]
     largest_number = max(number_matches) if number_matches else 0
@@ -981,19 +863,7 @@ def sales_purchase_intent(data: GetEmail):
     Process Sales / Purchase Intent emails with domain enrichment and lead scoring.
     For company domains, always enrich lead data before scoring.
     """
-    try:
-        category = classify_email_subject(data.subject)
-    except Exception as exc:
-        if is_quota_or_rate_limit_error(exc):
-            category = classify_email_subject_fallback(data.subject)
-        else:
-            raise HTTPException(
-                status_code=502, detail=f"LLM classification failed: {exc}") from exc
-
-    # LLM classification currently uses subject only; apply a body-aware heuristic
-    # to avoid missing sales intent on generic subjects.
-    if category != "Sales / Purchase Intent" and has_sales_purchase_signals(data.subject, data.body):
-        category = "Sales / Purchase Intent"
+    category = "Sales / Purchase Intent"
 
     sender_domain = extract_sender_domain(data.sender_email)
     is_personal_domain = sender_domain in PERSONAL_EMAIL_DOMAINS or not sender_domain
